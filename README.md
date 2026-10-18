@@ -104,6 +104,28 @@ Demo 只运行 `web/` 前端，构建时启用 `NEXT_PUBLIC_MOCK=1`，不需要 
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
+> **本地开发**若把 Docker 守护进程设为按需启动（不开机自启，出于安全考虑值得这样做），
+> 下面的 Docker 步骤前都要先启动它，用完再关掉。
+>
+> 改成按需启动（取消开机自启，并立即停止）：
+>
+> ```bash
+> sudo systemctl disable --now docker.socket docker.service
+> ```
+>
+> 之后每次使用时手动开关：
+>
+> ```bash
+> sudo systemctl start docker      # 或 start docker.socket docker.service
+> sudo systemctl stop docker       # 停守护进程会一并停掉容器
+> ```
+>
+> 想恢复成常驻：`sudo systemctl enable --now docker.socket docker.service`。
+>
+> `./docker-local.sh` 检测到守护进程未启动时只会提示启动命令，不会自行用 sudo 拉起。
+> 直接跑 `docker compose` 则报 "Cannot connect to the Docker daemon"——那是预期状态，不是故障。
+> 长期运行的服务器部署通常让 Docker 常驻，不受此影响。
+
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
@@ -119,7 +141,26 @@ cd ARTEX
 
 装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
 
-### 方式二：Docker Compose（手动）
+### 方式二：Docker Compose
+
+**一键脚本**（自动生成随机密码、拉镜像、等后端就绪）：
+
+```bash
+git clone https://github.com/RuoJi6/ARTEX.git
+cd ARTEX
+./docker-local.sh             # → http://localhost:8787
+```
+
+`docker-local.sh` 会从 `docker.env.example` 生成 `.env`（随机 `POSTGRES_PASSWORD`，权限 600），
+然后 `docker compose pull` + `up -d`，并轮询 `/api/health` 直到后端就绪。常用子命令：
+
+```bash
+./docker-local.sh logs        # 跟随后端日志
+./docker-local.sh status      # 守护进程与本项目容器状态
+./docker-local.sh down        # 停止并移除容器（保留 data/ 与 pgdata 卷）
+```
+
+**手动**：
 
 ```bash
 git clone https://github.com/RuoJi6/ARTEX.git
@@ -129,9 +170,17 @@ docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
 # → http://localhost:8787
 ```
 
+> `.env.example` 的 `POSTGRES_PASSWORD=change-me-please` 只是占位符，能直接启动。
+> 想让它「不填就报错」，改用 `docker.env.example`：该模板把密码留空，compose 用
+> `${POSTGRES_PASSWORD:?...}` 强制校验，忘记设置会直接失败而不是用一个弱密码跑起来。
+
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
-`.env` 中默认 `ARTEX_IMAGE=ruoji6/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `ruoji6/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
+> 两个端口默认只绑定回环地址（`127.0.0.1:8787` 控制台、`127.0.0.1:8788` 流量代理），
+> 不会暴露到局域网。需要局域网访问时把 `docker-compose.yml` 里的端口改成 `"8787:8787"`
+> ——控制台持有 LLM 密钥，请自行评估风险。
+
+`.env` 中默认 `ARTEX_IMAGE=ruoji6/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为某个正式版（如 `v0.3.21`，完整镜像地址 `ruoji6/artex:v0.3.21`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -168,7 +217,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ```bash
 ./build.sh --release
-# 产物：dist/artex-0.3.3-*.zip
+# 产物：dist/artex-0.3.21-*.zip
 ```
 
 UPX 自解压二进制可能与部分 Linux 内核、虚拟化环境或安全策略不兼容，因此默认不启用。可用 `ARTEX_TARGETS` 自定义目标；确认目标运行环境兼容时，可显式传入 `--upx` 进一步缩小二进制：
@@ -201,12 +250,12 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ### 维护者：通过 GitHub Actions 发布在线更新
 
-发布工作流为 `.github/workflows/release.yml`。推送正式标签会触发构建，也可在 Actions → release → Run workflow 中输入已存在的标签重新执行失败的发布。标签必须是 `v主版本.次版本.修订号`，例如下例的 `v0.3.17`；后续版本必须高于用户正在运行的版本。
+发布工作流为 `.github/workflows/release.yml`。推送正式标签会触发构建，也可在 Actions → release → Run workflow 中输入已存在的标签重新执行失败的发布。标签必须是 `v主版本.次版本.修订号`，例如下例的 `v0.3.21`；后续版本必须高于用户正在运行的版本。
 
 ```bash
 git push origin main
-git tag v0.3.17
-git push origin v0.3.17
+git tag v0.3.21
+git push origin v0.3.21
 ```
 
 工作流固定标签对应的提交，用 Node.js 22 导出前端，按照 `go.mod` 指定的 Go 版本编译内嵌前端的五个平台程序，并生成 ZIP 与 `SHA256SUMS`。AMD64 和 ARM64 镜像分别在 GitHub 原生 runner 上构建，连接临时 PostgreSQL 验证程序启动、版本和内嵌前端；两种架构都通过后发布多架构镜像的版本标签与 `latest`。镜像发布成功后上传完整 ZIP 和校验文件，最后公开 Release。已公开的同版本不允许覆盖，应发布新标签。
@@ -240,10 +289,10 @@ docker compose logs --tail=50 artex
 ```bash
 # 在下载目录运行；先按 SHA256SUMS 核对下载的 ZIP，再解压。
 sha256sum --ignore-missing --check SHA256SUMS
-unzip artex-0.3.17-linux-arm64.zip
+unzip artex-0.3.21-linux-arm64.zip
 sudo docker stop artex-artex-1
 sudo docker cp artex-artex-1:/app/artex ./artex-before-migration
-sudo docker cp ./artex-0.3.17-linux-arm64/artex artex-artex-1:/app/artex
+sudo docker cp ./artex-0.3.21-linux-arm64/artex artex-artex-1:/app/artex
 sudo docker start artex-artex-1
 curl --fail http://127.0.0.1:8787/api/health
 ```
@@ -267,7 +316,7 @@ cd ARTEX
 ```bash
 cd ARTEX
 git pull                       # 更新 compose / 脚本（可选）
-# 指定版本：在 .env 设 ARTEX_TAG=v0.3.17；不设则用 latest
+# 指定版本：在 .env 设 ARTEX_TAG=v0.3.21；不设则用 latest
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
