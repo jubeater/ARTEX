@@ -14,7 +14,8 @@ FROM python:3.12-slim-bookworm
 ARG TARGETARCH
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 从 NodeSource 装 22.x，与前端构建使用的主版本一致。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
