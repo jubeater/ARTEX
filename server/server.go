@@ -177,6 +177,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	s.engine.SetWorkerResolver(func(t *Task, slot WorkerSlot) (*agent.Worker, error) {
+		return s.workerForTaskSlot(t, slot)
+	})
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -575,7 +578,8 @@ func (s *Server) chatUnavailableReason() string {
 
 // providerForProfile returns a cached provider+cfg for a profile id, so every agent
 // bound/pinned to the same profile shares one provider instance (one rate limiter).
-// ok=false when the profile is missing/invalid → caller falls back to the global pair.
+// ok=false when the profile is missing/invalid; pinned callers surface that error
+// while legacy callers retain their existing fallback behavior.
 func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[id]; e != nil {
@@ -824,6 +828,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	s.registerFindingTraffic(mux)
+	s.registerRepeater(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
@@ -1540,6 +1545,8 @@ type createTaskReq struct {
 	PlanHeartbeatSeconds int              `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool            `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	Remark               string           `json:"remark,omitempty"`            // 任务备注(最多2000字);空=无
+	WorkerCount          int              `json:"worker_count,omitempty"`      // 本任务 Worker 数;0/省略=用全局默认;上限50
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1603,12 +1610,27 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		}
 		schedule = &input
 	}
+	remark, err := normalizeRemark(req.Remark)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.WorkerCount < 0 {
+		writeErr(w, 400, "Worker 运行数量不能为负数")
+		return
+	}
+	if req.WorkerCount > db.MaxTaskWorkerCount {
+		writeErr(w, 400, fmt.Sprintf("Worker 运行数量最多 %d", db.MaxTaskWorkerCount))
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Schedule: schedule,
 		Name:     strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
+		Remark:          remark,
+		WorkerCount:     req.WorkerCount,
 		InterceptRules:  interceptRules,
 	})
 	if err != nil {
@@ -3432,6 +3454,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"global_proxy":              s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
 		"python_interpreter":        strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                   s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"worker_pools":              s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
 		"task_concurrency_enabled":  concOn,                      // 任务并发上限开关(默认关)
 		"task_concurrency_limit":    concLimit,                   // 同时运行任务上限(开启后默认5)
 		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
@@ -3499,14 +3522,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
-		WebSearchEnabled *bool   `json:"web_search_enabled"`
-		WebSearchBackend *string `json:"web_search_backend"`
-		BraveKey         *string `json:"brave_search_api_key"`
-		TavilyKey        *string `json:"tavily_search_api_key"`
-		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
-		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
-		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
-		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		WebSearchEnabled *bool         `json:"web_search_enabled"`
+		WebSearchBackend *string       `json:"web_search_backend"`
+		BraveKey         *string       `json:"brave_search_api_key"`
+		TavilyKey        *string       `json:"tavily_search_api_key"`
+		WebSearchProxy   *string       `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
+		GlobalProxy      *string       `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		PythonInterp     *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
+		Workers          *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		WorkerPools      *[]WorkerPool `json:"worker_pools"`
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
@@ -3579,10 +3603,31 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Workers != nil {
-		if err := s.m.SetWorkers(*req.Workers); err != nil {
+	// A non-empty pool list takes precedence when both fields are present and
+	// synchronizes workers to its total. An empty list clears pools; when workers
+	// is also present it sets the legacy count for the newly restored legacy mode.
+	if req.WorkerPools != nil {
+		if len(*req.WorkerPools) == 0 && req.Workers != nil && *req.Workers <= 0 {
+			writeErr(w, 400, "workers 必须 >0")
+			return
+		}
+		legacyWorkers := []int(nil)
+		if req.Workers != nil {
+			legacyWorkers = []int{*req.Workers}
+		}
+		if err := s.m.SetWorkerPools(*req.WorkerPools, legacyWorkers...); err != nil {
 			writeErr(w, 400, err.Error())
 			return
+		}
+	} else if req.Workers != nil {
+		// An omitted worker_pools field leaves the saved mode unchanged. If a
+		// non-empty pool configuration is already saved, its total remains the
+		// authoritative concurrency and workers is deliberately ignored.
+		if len(s.m.WorkerPools()) == 0 {
+			if err := s.m.SetWorkers(*req.Workers); err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
 		}
 	}
 	if req.ConcurrencyEnabled != nil || req.ConcurrencyLimit != nil {

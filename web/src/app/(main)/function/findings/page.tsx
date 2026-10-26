@@ -42,7 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
-import { statusMeta } from "@/lib/status";
+import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
 import type {
   ActiveFindingRetest,
   Finding,
@@ -918,15 +918,7 @@ export default function FindingsPage() {
             size="sm"
             spacing={0}
           >
-            {(
-              [
-                ["all", "全部"],
-                ["critical", "严重"],
-                ["high", "高危"],
-                ["medium", "中危"],
-                ["low", "低危"],
-              ] as const
-            ).map(([val, label]) => (
+            {SEVERITY_FILTER_OPTIONS.map(([val, label]) => (
               <ToggleGroupItem key={val} value={val} aria-label={`按${label}等级筛选`}>
                 {label}
               </ToggleGroupItem>

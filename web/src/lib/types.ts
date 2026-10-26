@@ -4,10 +4,27 @@
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
+// Keep these limits aligned with db.MaxTaskRemarkRunes and db.MaxTaskWorkerCount.
+export const MAX_TASK_REMARK_RUNES = 2000;
+export const MAX_TASK_WORKER_COUNT = 50;
+
+// Parse the optional worker-count input without silently changing invalid values.
+// An empty field means 0 (use the global default); every other value must be an
+// integer in the backend's accepted range.
+export function parseWorkerCountInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return 0;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return null;
+  if (parsed < 0 || parsed > MAX_TASK_WORKER_COUNT) return null;
+  return parsed;
+}
+
 export interface Task {
   distinct_findings?: FindingDistinctStats;
   id: string;
   remark?: string;
+  worker_count?: number; // 本任务 Worker 数;0/缺省=用全局默认
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   category_id?: number;
   category_name?: string;
@@ -56,8 +73,10 @@ export interface TaskTemplate {
   name: string;
   description: string;
   goal: string;
+  remark?: string; // 预设备注
   category_id?: number | null; // 预设分类；null/缺省=无
   intercept_rules?: AssetInterceptRuleInput[]; // 预设的任务级拦截/允许规则
+  worker_count?: number; // 预设 Worker 数;0/缺省=用全局默认
   created_at: string;
   updated_at: string;
 }
@@ -968,6 +987,7 @@ export interface Settings {
   global_proxy?: string;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
+  worker_pools: WorkerPool[];
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
   task_concurrency_enabled?: boolean; // 默认 false
   task_concurrency_limit?: number; // 开启后默认 5
@@ -987,6 +1007,11 @@ export interface Settings {
   notify_enabled?: boolean; // 推送总开关，默认开；用于维护期一键止血
   notify_public_base_url?: string; // 漏洞详情回链的外部访问地址；空=消息不带回链
   notify_digest_interval_min?: number; // 汇总模式周期（分钟），默认 30
+}
+
+export interface WorkerPool {
+  profile_id: string;
+  workers: number;
 }
 
 // ---- 漏洞 IM 推送 ----
@@ -1618,6 +1643,29 @@ export interface FindingTrafficDetail {
   response: EvidenceBodyPreview;
 }
 
+export interface RepeaterSendRequest {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeout_ms?: number;
+  insecure_skip_verify?: boolean;
+  use_recording_proxy?: boolean;
+}
+
+export interface RepeaterSendResponse {
+  status: number;
+  status_text: string;
+  proto: string;
+  headers: Record<string, string[]>;
+  body: string;
+  body_truncated: boolean;
+  body_bytes: number;
+  elapsed_ms: number;
+  url: string;
+  error?: string;
+}
+
 export interface UpdateSettings {
   proxy: string;
 }
@@ -1734,6 +1782,7 @@ export interface FindingCaseSuggestion {
   task_id: string;
   left_id: string;
   right_id: string;
+  finding_ids: string[];
   title: string;
   reason: string;
   state: string;

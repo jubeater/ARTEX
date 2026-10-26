@@ -51,6 +51,8 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
+  RepeaterSendRequest,
+  RepeaterSendResponse,
   IntelligencePage,
   IntentAsset,
   InterceptApprovalFilter,
@@ -300,6 +302,7 @@ export const api = {
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     name?: string;
+    remark?: string;
     categoryId?: number;
     description: string;
     goal: string;
@@ -310,11 +313,13 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    workerCount?: number;
     interceptRules?: AssetInterceptRuleInput[];
     schedule?: ScheduleInput;
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
+      remark: input.remark ?? "",
       category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,
@@ -325,6 +330,7 @@ export const api = {
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      worker_count: input.workerCount ?? 0, // 0 = 用全局默认 workers
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       schedule: input.schedule ? schedulePayload(input.schedule) : undefined,
     }),
@@ -357,11 +363,11 @@ export const api = {
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (
-    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+    input: Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">,
   ) => post<TaskTemplate>("/task-templates", input),
   updateTaskTemplate: (
     id: number,
-    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
@@ -645,8 +651,11 @@ export const api = {
     get<FindingCaseSuggestion[]>(
       `/exploration/finding-case-suggestions${task ? `?task_id=${encodeURIComponent(task)}` : ""}`,
     ),
-  resolveFindingCaseSuggestion: (id: string, accept: boolean) =>
-    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, { accept }),
+  resolveFindingCaseSuggestion: (id: string, accept: boolean, excludeIds?: string[]) =>
+    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, {
+      accept,
+      ...(excludeIds && excludeIds.length > 0 ? { exclude_ids: excludeIds } : {}),
+    }),
   reviewFindingCases: (ids: string[]) =>
     post<{ runs: { conversation_id: number; task_id: string }[] }>("/exploration/finding-case-review", {
       finding_ids: ids,
@@ -733,6 +742,7 @@ export const api = {
     get<FindingTrafficDetail>(
       `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
     ),
+  repeaterSend: (req: RepeaterSendRequest) => post<RepeaterSendResponse>("/repeater/send", req),
   findingTrafficBody: (
     id: string,
     bindingId: string,

@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { toast } from "sonner";
 
+import { FindingRepeaterDialog, headersFromReqHead, type RepeaterInitial } from "@/components/finding-repeater-dialog";
 import { HttpCodeBlock } from "@/components/http-code-block";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,8 @@ export function TrafficEvidenceViewer({
   const [detail, setDetail] = React.useState<FindingTrafficDetail | null>(null);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [repeaterOpen, setRepeaterOpen] = React.useState(false);
+  const [repeaterInitial, setRepeaterInitial] = React.useState<RepeaterInitial>();
   React.useEffect(() => {
     if (!bindingId) return;
     let active = true;
@@ -62,64 +65,94 @@ export function TrafficEvidenceViewer({
     }
   }
 
+  function openRepeater() {
+    if (!detail) return;
+    if (detail.request.binary) toast.info("请求体为二进制，已留空；完整正文请先下载");
+    else if (detail.request.truncated) toast.info("请求体为预览片段，完整正文请先下载");
+    setRepeaterInitial({
+      method: detail.binding.snapshot.method || "GET",
+      url: detail.binding.snapshot.url || "",
+      headersText: headersFromReqHead(detail.binding.snapshot.req_head),
+      body: detail.request.binary ? "" : detail.request.content || "",
+    });
+    setRepeaterOpen(true);
+  }
+
   return (
-    <Dialog
-      open={bindingId !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>流量证据 #{bindingId}</DialogTitle>
-          <DialogDescription className="break-all">
-            {detail?.binding.snapshot.url ?? "查看绑定时保存的请求与响应"}
-          </DialogDescription>
-        </DialogHeader>
-        {error ? (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        ) : detail ? (
-          <Tabs defaultValue="request">
-            <TabsList>
-              <TabsTrigger value="request">请求 Request</TabsTrigger>
-              <TabsTrigger value="response">响应 Response</TabsTrigger>
-            </TabsList>
-            {(["request", "response"] as const).map((side) => (
-              <TabsContent key={side} value={side}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    正文 {detail[side].total.toLocaleString()} 字节{detail[side].truncated ? " · 当前为预览" : ""}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void api
-                        .downloadFindingTrafficBody(findingId, detail.binding.id, side, contextTask)
-                        .catch((e: Error) => toast.error(e.message))
-                    }
-                  >
-                    下载完整{side === "request" ? "请求" : "响应"}正文
-                  </Button>
-                </div>
-                <HttpCodeBlock
-                  raw={`${(side === "request" ? detail.binding.snapshot.req_head : detail.binding.snapshot.resp_head)?.trimEnd() ?? ""}\n\n${detail[side].content}`}
-                />
-                {detail[side].truncated && !detail[side].binary ? (
-                  <Button variant="outline" size="sm" disabled={busy} onClick={() => void more(side)}>
-                    加载更多正文
-                  </Button>
-                ) : null}
-              </TabsContent>
-            ))}
-          </Tabs>
-        ) : (
-          <Skeleton className="h-56 w-full" />
-        )}
-      </DialogContent>
-    </Dialog>
+    <>
+      <Dialog
+        open={bindingId !== null}
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+          <DialogHeader>
+            <div className="flex flex-wrap items-start justify-between gap-2 pe-8">
+              <div>
+                <DialogTitle>流量证据 #{bindingId}</DialogTitle>
+                <DialogDescription className="break-all">
+                  {detail?.binding.snapshot.url ?? "查看绑定时保存的请求与响应"}
+                </DialogDescription>
+              </div>
+              {detail ? (
+                <Button variant="outline" size="sm" onClick={openRepeater}>
+                  送入 Repeater
+                </Button>
+              ) : null}
+            </div>
+          </DialogHeader>
+          {error ? (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          ) : detail ? (
+            <Tabs defaultValue="request">
+              <TabsList>
+                <TabsTrigger value="request">请求 Request</TabsTrigger>
+                <TabsTrigger value="response">响应 Response</TabsTrigger>
+              </TabsList>
+              {(["request", "response"] as const).map((side) => (
+                <TabsContent key={side} value={side}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      正文 {detail[side].total.toLocaleString()} 字节{detail[side].truncated ? " · 当前为预览" : ""}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        void api
+                          .downloadFindingTrafficBody(findingId, detail.binding.id, side, contextTask)
+                          .catch((e: Error) => toast.error(e.message))
+                      }
+                    >
+                      下载完整{side === "request" ? "请求" : "响应"}正文
+                    </Button>
+                  </div>
+                  <HttpCodeBlock
+                    raw={`${(side === "request" ? detail.binding.snapshot.req_head : detail.binding.snapshot.resp_head)?.trimEnd() ?? ""}\n\n${detail[side].content}`}
+                  />
+                  {detail[side].truncated && !detail[side].binary ? (
+                    <Button variant="outline" size="sm" disabled={busy} onClick={() => void more(side)}>
+                      加载更多正文
+                    </Button>
+                  ) : null}
+                </TabsContent>
+              ))}
+            </Tabs>
+          ) : (
+            <Skeleton className="h-56 w-full" />
+          )}
+        </DialogContent>
+      </Dialog>
+      <FindingRepeaterDialog
+        open={repeaterOpen}
+        onOpenChange={setRepeaterOpen}
+        initial={repeaterInitial}
+        findingLabel={bindingId ? `证据 #${bindingId}` : undefined}
+      />
+    </>
   );
 }
 
